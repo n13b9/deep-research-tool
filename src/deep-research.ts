@@ -120,3 +120,162 @@ async function processSerpResult({
 
   return res.object;
 }
+
+export async function deepResearch({
+  query,
+  breadth,
+  depth,
+  learnings = [],
+  visitedUrls = [],
+  onProgress,
+}: {
+  query: string;
+  breadth: number;
+  depth: number;
+  learnings?: string[];
+  visitedUrls?: string[];
+  onProgress?: (progress: ResearchProgress) => void;
+}): Promise<ResearchResult> {
+  const progress: ResearchProgress = {
+    currentDepth: depth,
+    totalDepth: depth,
+    currentBreadth: breadth,
+    totalBreadth: breadth,
+    totalQueries: 0,
+    completedQueries: 0,
+  };
+
+  const reportProgress = (update: Partial<ResearchProgress>) => {
+    Object.assign(progress, update);
+    onProgress?.(progress);
+  };
+
+  const serpQueries = await generateSerpQueries({
+    query,
+    numQueries: breadth,
+    learnings,
+  });
+
+  reportProgress({
+    totalQueries: serpQueries.length,
+    currentQuery: serpQueries[0]?.query,
+  });
+
+  const limit = pLimit(ConcurrencyLimit);
+
+  const results = await Promise.all(
+    serpQueries.map(async (serpQuery) =>
+      limit(async () => {
+        try {
+          const result = await firecrawl.search(serpQuery.query, {
+            timeout: 15000,
+            limit: 5,
+            scrapeOptions: { formats: ["markdown"] },
+          });
+
+          // Collect URLs from this search
+          const newUrls = compact(result.data.map((item) => item.url));
+          const newBreadth = Math.ceil(breadth / 2);
+          const newDepth = depth - 1;
+
+          const newLearnings = await processSerpResult({
+            query: serpQuery.query,
+            result: result,
+            numFollowUpQuestions: newBreadth,
+          });
+
+          const allLearnings = [...learnings, ...newLearnings.learnings];
+          const allUrls = [...visitedUrls, ...newUrls];
+
+          if (newDepth > 0) {
+            log(
+              `Researching deeper, breadth: ${newBreadth}, depth: ${newDepth}`
+            );
+
+            reportProgress({
+              currentDepth: newDepth,
+              currentBreadth: newBreadth,
+              completedQueries: progress.completedQueries + 1,
+              currentQuery: serpQuery.query,
+            });
+
+            const nextQuery = `
+            Previous research goal: ${serpQuery.researchGoal}
+            Follow-up research directions: ${newLearnings.followUpQuestions
+              .map((q) => `\n${q}`)
+              .join("")}
+          `.trim();
+
+            return deepResearch({
+              query: nextQuery,
+              breadth: newBreadth,
+              depth: newDepth,
+              learnings: allLearnings,
+              visitedUrls: allUrls,
+              onProgress,
+            });
+          } else {
+            reportProgress({
+              currentDepth: 0,
+              completedQueries: progress.completedQueries + 1,
+              currentQuery: serpQuery.query,
+            });
+            return {
+              learnings: allLearnings,
+              visitedUrls: allUrls,
+            };
+          }
+        } catch (e: any) {
+          if (e.message && e.message.includes("Timeout")) {
+            log(`Timeout error running query: ${serpQuery.query}: `, e);
+          } else {
+            log(`Error running query: ${serpQuery.query}: `, e);
+          }
+          return {
+            learnings: [],
+            visitedUrls: [],
+          };
+        }
+      })
+    )
+  );
+
+  return {
+    learnings: [...new Set(results.flatMap((r) => r.learnings))],
+    visitedUrls: [...new Set(results.flatMap((r) => r.visitedUrls))],
+  };
+}
+
+export async function writeFinalReport({
+  prompt,
+  learnings,
+  visitedUrls,
+}: {
+  prompt: string;
+  learnings: string[];
+  visitedUrls: string[];
+}) {
+  const learningsString = trimPrompt(
+    learnings
+      .map((learning) => `<learning>\n${learning}\n</learning>`)
+      .join("\n"),
+    150_000
+  );
+
+  const res = await generateObject({
+    model: o3MiniModel,
+    system: systemPrompt(),
+    prompt: `Given the following prompt from the user, write a final report on the topic using the learnings from research. Make it as as detailed as possible, aim for 3 or more pages, include ALL the learnings from research:\n\n<prompt>${prompt}</prompt>\n\nHere are all the learnings from previous research:\n\n<learnings>\n${learningsString}\n</learnings>`,
+    schema: z.object({
+      reportMarkdown: z
+        .string()
+        .describe("Final report on the topic in Markdown"),
+    }),
+  });
+
+  // Append the visited URLs section to the report
+  const urlsSection = `\n\n## Sources\n\n${visitedUrls
+    .map((url) => `- ${url}`)
+    .join("\n")}`;
+  return res.object.reportMarkdown + urlsSection;
+}
