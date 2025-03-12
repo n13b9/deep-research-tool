@@ -1,6 +1,9 @@
 import * as fs from "fs/promises";
 import * as readline from "readline";
 
+import * as dotenv from "dotenv";
+dotenv.config({ path: ".env.local" });
+
 import { deepResearch, writeFinalReport } from "./deep-research";
 import { generateFeedback } from "./feedback";
 import { OutputManager } from "./output-manager";

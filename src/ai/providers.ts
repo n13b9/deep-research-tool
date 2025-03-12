@@ -1,5 +1,6 @@
 import { createOpenAI, type OpenAIProviderSettings } from "@ai-sdk/openai";
 import { getEncoding } from "js-tiktoken";
+import "dotenv/config";
 
 // import { RecursiveCharacterTextSplitter } from './text-splitter';
 
